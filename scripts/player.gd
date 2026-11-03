@@ -42,6 +42,14 @@ func _ready() -> void:
 	body_shape.shape = capsule
 	add_child(body_shape)
 
+func _process(_delta: float) -> void:
+	# Camera rotation must not depend on _physics_process running:
+	# if physics is ever disabled, rotate_camera() still updates the
+	# pivot visually on the next rendered frame.
+	if _pivot != null:
+		_pivot.rotation.y = camera_yaw
+		_pivot.rotation.x = camera_pitch
+
 func _physics_process(delta: float) -> void:
 	if driving:
 		# While driving, GameManager snaps the player to the vehicle and

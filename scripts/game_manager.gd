@@ -1,10 +1,17 @@
 extends Node3D
-## v0.3.1 main controller - mini-town, multi-objective heist.
+## v0.3.2 main controller - mini-town, multi-objective heist.
 ## v0.3.1 spawn fix: floor voxels now have real collision (see
-## voxel_world.gd), the player spawns at y=3.0, physics stays off
-## until 2 physics frames after setup, a solid slab backs up the
-## floor grid, and any fall below y=-5 respawns the player instead
-## of leaving them in the void.
+## voxel_world.gd), the player spawns at y=3.0, a solid slab backs
+## up the floor grid, and any fall below y=-5 respawns the player.
+## v0.3.2 UI/unfreeze fix: the old _ready() awaited 2 physics frames
+## before re-enabling player physics — that await was the only new
+## freeze risk in Run #7, and it is removed. Player physics is now
+## enabled synchronously at the end of _ready(), the tree is
+## explicitly unpaused with time_scale 1.0, and _process() re-enables
+## player physics if it is ever found disabled, so the game can
+## never stay frozen waiting for a signal. TouchUI is added as a
+## top-level CanvasLayer to the scene root, in the order:
+## world -> player -> vehicle/audio -> UI -> UI links -> update.
 ## Order of play (progress tracker shows this at all times):
 ##  1) Start in the fenced parking lot.
 ##  2) Go to the guard office, grab the Security Keycard (cyan voxel).
@@ -40,6 +47,9 @@ var _alarm_timer: float = 0.0
 var _vault_locked_notice: bool = false
 
 func _ready() -> void:
+	# Unfreeze first, explicitly: never start paused or slowed.
+	Engine.time_scale = 1.0
+	get_tree().paused = false
 	world = VoxelWorld.new()
 	world.name = "VoxelWorld"
 	add_child(world)
@@ -52,11 +62,12 @@ func _ready() -> void:
 	player.name = "Player"
 	spawn_pos = markers["player_start"]
 	player.position = spawn_pos
+	player.velocity = Vector3.ZERO
 	add_child(player)
-	# Spawn delay / safe init: keep player physics off until the
-	# world, floor collisions and this whole setup are in the tree.
-	# It is re-enabled at the end of _ready(), after 2 physics frames.
-	player.set_physics_process(false)
+	# Physics is enabled synchronously at the end of _ready() (see
+	# below). No await here: the world was already built above, in
+	# this same _ready(), before the first physics frame, so all
+	# floor/wall shapes are registered by the time physics runs.
 	player.attacked.connect(_on_player_attacked)
 	vehicle = EscapeVehicle.new()
 	vehicle.name = "EscapeVehicle"
@@ -68,7 +79,13 @@ func _ready() -> void:
 	add_child(audio)
 	ui = TouchUI.new()
 	ui.name = "TouchUI"
-	add_child(ui)
+	ui.layer = 10
+	ui.visible = true
+	# Top-level CanvasLayer: add to the scene root, not under this
+	# 3D Node3D, so no 3D parent transform/visibility can hide it.
+	# GameManager still holds the reference and updates it via
+	# _update_ui(), in this exact order: UI created, then links set.
+	get_tree().root.add_child(ui)
 	ui.player = player
 	ui.game_manager = self
 	world.voxel_destroyed.connect(_on_voxel_destroyed)
@@ -102,15 +119,23 @@ func _ready() -> void:
 	light.light_energy = 1.2
 	add_child(light)
 	_update_ui()
-	# Safe-init complete: let 2 physics frames register all shapes,
-	# then drop the player (spawn y=3.0, rests at y=2.0) with physics on.
-	await get_tree().physics_frame
-	await get_tree().physics_frame
+	# Final unfreeze, synchronously, in chronological order:
+	# world built -> player created -> vehicle/audio -> UI created
+	# and linked -> UI updated -> player physics on. No signal is
+	# awaited, so this cannot hang waiting for a frame that never
+	# fires. The player drops from spawn y=3.0 and rests at y=2.0.
 	if is_instance_valid(player):
 		player.velocity = Vector3.ZERO
 		player.set_physics_process(true)
+		player.set_process(true)
+		player.set_process_input(true)
 
 func _process(delta: float) -> void:
+	# Permanent unfreeze guard: if player physics is ever found
+	# disabled (except while the player node itself is gone), turn
+	# it back on immediately instead of leaving the game frozen.
+	if player != null and not player.is_physics_processing():
+		player.set_physics_process(true)
 	if phase == Phase.ALARM:
 		time_left -= delta
 		_alarm_timer -= delta
@@ -193,6 +218,8 @@ func toggle_drive() -> bool:
 	return false
 
 func restart() -> void:
+	Engine.time_scale = 1.0
+	get_tree().paused = false
 	if world != null:
 		world.clear_all()
 		var markers := TestMapBuilder.build(world)
