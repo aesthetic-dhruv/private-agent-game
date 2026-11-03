@@ -14,11 +14,21 @@ name: Build Android APK
 # without notice and hide a failure.
 #
 # IMPORTANT, READ BEFORE YOU RELY ON THIS:
+# Node 24 action versions (Run #1 used Node 20 actions and failed):
+# - actions/checkout v5, actions/setup-java v5, android-actions/setup-android v4,
+#   actions/upload-artifact v6 are the FIRST majors declaring runs.using: node24.
+#   Do NOT "fix" this by going to checkout@v4.2.2 or upload-artifact@v5 —
+#   both still declare node20 and would leave the deprecation/failure in place.
+# - Inputs used here are unchanged across these bumps: checkout (none),
+#   setup-java (distribution + java-version), setup-android (none — its v4
+#   default is platform-tools only, dropping the removed 'tools' package
+#   that v3 tried to install), upload-artifact (name + path + if-no-files-found).
+#   GitHub-hosted runners already satisfy the v2.327.1+ runner floor.
 # - This workflow has NOT been run in GitHub Actions from this sandbox.
 #   It is the standard Godot 4.2 headless export sequence, written to
 #   match this project's project.godot (Godot 4.2, mobile renderer).
-#   The first real CI run is the test. If it fails, the Actions log
-#   will show exactly which step failed (templates, SDK, keystore, export).
+#   If a later run fails, the Actions log will show exactly which step
+#   failed (templates, SDK, keystore, export).
 # - The debug keystore below is generated fresh on every run, exactly
 #   as requested, so the build does not fail for a missing keystore.
 #   Consequence: each CI APK has a DIFFERENT signature. Android will
@@ -47,16 +57,16 @@ jobs:
 
     steps:
       - name: Check out project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android platform and build tools
         run: |
@@ -137,7 +147,7 @@ jobs:
           ls -lh build/android/
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: voxel-heist-android-apk
           path: build/android/*.apk
