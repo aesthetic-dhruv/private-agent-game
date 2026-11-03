@@ -24,6 +24,17 @@ name: Build Android APK
 #   default is platform-tools only, dropping the removed 'tools' package
 #   that v3 tried to install), upload-artifact (name + path + if-no-files-found).
 #   GitHub-hosted runners already satisfy the v2.327.1+ runner floor.
+# Run #5 root-cause fix (Run #4 blank configuration error):
+# - project.godot was missing textures/vram_compression/import_etc2_astc=true
+#   under [rendering]. Multiple Godot Android guides note exactly this:
+#   without it, Android export fails with an empty "configuration errors"
+#   message — which matches Run #4's log (error line, then a blank line,
+#   no specific error listed). The preset already sets texture_format/etc2=true,
+#   so the project import setting must match it.
+# - In addition, the preset now carries explicit custom_template/debug and
+#   custom_template/release paths and an absolute keystore/debug path, and
+#   this workflow rewrites those preset lines at runtime to the actual
+#   workspace/template paths, so preset and editor settings cannot disagree.
 # Workspace-local Godot user dirs (Run #4):
 # - Godot has NO editor setting to point to an arbitrary templates
 #   folder, so a literal ${GITHUB_WORKSPACE}/templates/ folder alone
@@ -187,6 +198,51 @@ jobs:
           cat "$CONFIG_DIR/editor_settings-4.tres"
           ls -lh "$CONFIG_DIR/"
 
+      - name: Inject explicit template + keystore paths into preset
+        # Run #5 fix, part 1: explicit template paths.
+        # Godot 4.2 preset options custom_template/debug and
+        # custom_template/release, if empty, use the default template
+        # lookup. Setting them explicitly removes auto-detection as
+        # a failure mode. The committed preset already contains the
+        # standard GitHub runner absolute paths, but a preset file
+        # cannot expand ${GITHUB_WORKSPACE} itself, so this step
+        # rewrites those lines to the ACTUAL workspace + template
+        # dir for this run (identical on standard runners, robust
+        # if the runner workspace root ever changes).
+        # Run #5 fix, part 2: keystore mapping.
+        # keystore/debug in the preset is rewritten to the exact
+        # absolute path used in editor settings, so preset and
+        # editor settings cannot disagree. The export step also sets
+        # GODOT_ANDROID_KEYSTORE_DEBUG_PATH/USER/PASSWORD, which
+        # Godot documents as overriding the preset keystore fields.
+        run: |
+          set -e
+          TEMPLATE_DIR="${TEMPLATE_DIR:-$XDG_DATA_HOME/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}}"
+          python3 - << 'PYEOF'
+          import os, re
+          ws = os.environ["GITHUB_WORKSPACE"]
+          tpl = os.environ.get("TEMPLATE_DIR") or os.path.join(os.environ.get("XDG_DATA_HOME", ""), "godot", "export_templates", os.environ["GODOT_VERSION"] + "." + os.environ["GODOT_STATUS"])
+          path = os.path.join(ws, "export_presets.cfg")
+          text = open(path).read()
+          def set_opt(text, key, value):
+              line = f'{key}="{value}"'
+              if re.search(rf'^{re.escape(key)}=.*$', text, re.M):
+                  return re.sub(rf'^{re.escape(key)}=.*$', line, text, count=1, flags=re.M)
+              # Insert right after the [preset.0.options] header.
+              return text.replace("[preset.0.options]\n", "[preset.0.options]\n" + line + "\n", 1)
+          text = set_opt(text, "custom_template/debug", os.path.join(tpl, "android_debug.apk"))
+          text = set_opt(text, "custom_template/release", os.path.join(tpl, "android_release.apk"))
+          text = set_opt(text, "keystore/debug", os.path.join(ws, "debug.keystore"))
+          text = set_opt(text, "keystore/debug_user", "androiddebugkey")
+          text = set_opt(text, "keystore/debug_password", "android")
+          open(path, "w").write(text)
+          PYEOF
+          echo "=== Preset after injection ==="
+          grep -E "custom_template/|keystore/debug" "${GITHUB_WORKSPACE}/export_presets.cfg"
+          test -f "${TEMPLATE_DIR}/android_debug.apk" || { echo "::error::custom_template/debug target missing"; exit 1; }
+          test -f "${TEMPLATE_DIR}/android_release.apk" || { echo "::error::custom_template/release target missing"; exit 1; }
+          test -f "${GITHUB_WORKSPACE}/debug.keystore" || { echo "::error::keystore/debug target missing"; exit 1; }
+
       - name: Import project (creates .godot/ import cache)
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/build/android"
@@ -202,6 +258,10 @@ jobs:
           test -f "${GITHUB_WORKSPACE}/export_presets.cfg" || { echo "::error::Missing export_presets.cfg"; exit 1; }
           test -f "${GITHUB_WORKSPACE}/project.godot" || { echo "::error::Missing project.godot"; exit 1; }
           ls -la "${GITHUB_WORKSPACE}/export_presets.cfg" "${GITHUB_WORKSPACE}/project.godot"
+          echo "=== Preset + project config checks (Run #5 root-cause fix) ==="
+          grep -E "custom_template/|keystore/debug" "${GITHUB_WORKSPACE}/export_presets.cfg"
+          grep -q "textures/vram_compression/import_etc2_astc=true" "${GITHUB_WORKSPACE}/project.godot" || { echo "::error::Missing textures/vram_compression/import_etc2_astc=true in project.godot — Android export fails with a blank configuration error without it"; exit 1; }
+          echo "import_etc2_astc=true present in project.godot"
           echo "=== Android SDK / JDK ==="
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
           echo "JAVA_HOME=${JAVA_HOME}"
@@ -221,6 +281,10 @@ jobs:
           ls -la "${GITHUB_WORKSPACE}/build/android"
 
       - name: Export Android debug APK
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
         # Preset name must match export_presets.cfg exactly: "Android".
         # use_gradle_build is false in that preset, so this export does
         # NOT need Gradle. It signs the prebuilt template APK with the
