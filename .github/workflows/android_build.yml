@@ -1,0 +1,144 @@
+name: Build Android APK
+
+# Builds Voxel Heist for Android in the cloud, so you do not need a PC.
+# Trigger: every push to main, plus manual Run workflow in the Actions tab.
+# Output: a debug .apk uploaded as a GitHub Actions artifact.
+# Download it from Actions -> this workflow run -> Artifacts, then
+# install it on your Android phone (see README, CI section).
+#
+# Why a standard Ubuntu runner + official Godot headless, not a
+# third-party Godot export action: the user asked for either route.
+# This route uses only official sources (Godot releases, actions/setup-java,
+# android-actions/setup-android), so the version, SDK and keystore steps
+# are visible and debuggable. A third-party action can change inputs
+# without notice and hide a failure.
+#
+# IMPORTANT, READ BEFORE YOU RELY ON THIS:
+# - This workflow has NOT been run in GitHub Actions from this sandbox.
+#   It is the standard Godot 4.2 headless export sequence, written to
+#   match this project's project.godot (Godot 4.2, mobile renderer).
+#   The first real CI run is the test. If it fails, the Actions log
+#   will show exactly which step failed (templates, SDK, keystore, export).
+# - The debug keystore below is generated fresh on every run, exactly
+#   as requested, so the build does not fail for a missing keystore.
+#   Consequence: each CI APK has a DIFFERENT signature. Android will
+#   refuse to install a new CI APK over an old CI APK. Uninstall the
+#   old Voxel Heist APK from your phone first, then install the new one.
+#   To keep one signature across builds, store a persistent debug
+#   keystore as a base64 GitHub Secret and restore it instead of
+#   generating a new one (see the commented step near the keystore step).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-22.04
+    env:
+      GODOT_VERSION: "4.2.2"
+      GODOT_STATUS: "stable"
+      # Godot 4.2 targets Android API 34. Keep these in sync with
+      # the export preset in export_presets.cfg.
+      ANDROID_API: "34"
+      ANDROID_BUILD_TOOLS: "34.0.0"
+
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and build tools
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "platforms;android-${ANDROID_API}" "build-tools;${ANDROID_BUILD_TOOLS}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+
+      - name: Download official Godot headless + export templates
+        run: |
+          set -e
+          mkdir -p "$HOME/godot" "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}"
+          cd "$HOME/godot"
+          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-${GODOT_STATUS}/Godot_v${GODOT_VERSION}-${GODOT_STATUS}_linux.x86_64.zip" -O godot.zip
+          unzip -o godot.zip
+          chmod +x "Godot_v${GODOT_VERSION}-${GODOT_STATUS}_linux.x86_64"
+          mv "Godot_v${GODOT_VERSION}-${GODOT_STATUS}_linux.x86_64" godot
+          echo "$HOME/godot" >> "$GITHUB_PATH"
+          # Export templates MUST match the Godot version exactly.
+          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-${GODOT_STATUS}/Godot_v${GODOT_VERSION}-${GODOT_STATUS}_export_templates.tpz" -O templates.tpz
+          unzip -o templates.tpz -d "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}"
+          # Templates unzip into a templates/ subfolder; move them up one level
+          # if needed, so Godot finds them at the versioned path.
+          if [ -d "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}/templates" ]; then
+            mv "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}/templates/"* "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}/"
+            rmdir "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}/templates" || true
+          fi
+          ls "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}/"
+
+      - name: Verify Godot version
+        run: godot --version
+
+      - name: Generate temporary debug keystore
+        # This is a DEBUG keystore only. Never use it for a Play Store release.
+        # If you later want one signature across builds, replace this step
+        # with restoring a base64 keystore from a GitHub Secret, for example:
+        #   echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | base64 -d > debug.keystore
+        # and keep the same alias / passwords below.
+        run: |
+          if [ ! -f debug.keystore ]; then
+            keytool -genkey -v \
+              -keystore debug.keystore \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          ls -lh debug.keystore
+
+      - name: Configure Godot editor settings for Android SDK
+        # Headless export reads the SDK path and debug keystore from
+        # Godot's editor settings, not just from ANDROID_HOME.
+        # Godot 4.2 uses editor_settings-4.2.cfg in ~/.config/godot/.
+        run: |
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-4.2.cfg" <<EOF
+          [export]
+
+          android/android_sdk_path = "${ANDROID_SDK_ROOT}"
+          android/debug_keystore = "${GITHUB_WORKSPACE}/debug.keystore"
+          android/debug_keystore_user = "androiddebugkey"
+          android/debug_keystore_pass = "android"
+          EOF
+          cat "$HOME/.config/godot/editor_settings-4.2.cfg"
+
+      - name: Import project (creates .godot/ import cache)
+        run: |
+          mkdir -p build/android
+          godot --headless --path . --import --quit || true
+
+      - name: Export Android debug APK
+        # Preset name must match export_presets.cfg exactly: "Android".
+        # use_gradle_build is false in that preset, so this export does
+        # NOT need Gradle. It signs the prebuilt template APK with the
+        # debug keystore generated above.
+        run: |
+          godot --headless --path . --export-debug "Android" build/android/VoxelHeist.apk
+          ls -lh build/android/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voxel-heist-android-apk
+          path: build/android/*.apk
+          if-no-files-found: error
