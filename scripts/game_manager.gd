@@ -1,5 +1,10 @@
 extends Node3D
-## v0.3 main controller - mini-town, multi-objective heist.
+## v0.3.1 main controller - mini-town, multi-objective heist.
+## v0.3.1 spawn fix: floor voxels now have real collision (see
+## voxel_world.gd), the player spawns at y=3.0, physics stays off
+## until 2 physics frames after setup, a solid slab backs up the
+## floor grid, and any fall below y=-5 respawns the player instead
+## of leaving them in the void.
 ## Order of play (progress tracker shows this at all times):
 ##  1) Start in the fenced parking lot.
 ##  2) Go to the guard office, grab the Security Keycard (cyan voxel).
@@ -30,6 +35,7 @@ var vehicle_start: Vector3 = Vector3.ZERO
 var escape_zone: Vector3 = Vector3.ZERO
 var has_keycard: bool = false
 var driving: bool = false
+var spawn_pos: Vector3 = Vector3(-5.0, 3.0, 18.0)
 var _alarm_timer: float = 0.0
 var _vault_locked_notice: bool = false
 
@@ -44,8 +50,13 @@ func _ready() -> void:
 	escape_zone = markers["escape_zone"]
 	player = Player.new()
 	player.name = "Player"
-	player.position = markers["player_start"]
+	spawn_pos = markers["player_start"]
+	player.position = spawn_pos
 	add_child(player)
+	# Spawn delay / safe init: keep player physics off until the
+	# world, floor collisions and this whole setup are in the tree.
+	# It is re-enabled at the end of _ready(), after 2 physics frames.
+	player.set_physics_process(false)
 	player.attacked.connect(_on_player_attacked)
 	vehicle = EscapeVehicle.new()
 	vehicle.name = "EscapeVehicle"
@@ -62,17 +73,42 @@ func _ready() -> void:
 	ui.game_manager = self
 	world.voxel_destroyed.connect(_on_voxel_destroyed)
 	world.voxel_blocked.connect(_on_voxel_blocked)
+	# Solid backup floor: a big slab under the whole map, top at y=0,
+	# so walking off a floor-voxel rect cannot drop the player into
+	# the void either. Floor voxels themselves (top at y=1.0) are the
+	# primary ground; this slab only catches the off-map case.
 	var ground := StaticBody3D.new()
+	ground.name = "BackupGroundSlab"
 	var ground_shape := CollisionShape3D.new()
-	var plane := WorldBoundaryShape3D.new()
-	ground_shape.shape = plane
+	var slab := BoxShape3D.new()
+	slab.size = Vector3(80.0, 1.0, 80.0)
+	ground_shape.shape = slab
+	ground_shape.position = Vector3(10.0, -0.5, 10.0)
 	ground.add_child(ground_shape)
 	add_child(ground)
+	# Last-resort boundary, explicitly at y=-10 (not the old y=0
+	# WorldBoundary-only floor, which CharacterBody did not reliably
+	# land on). Anything that somehow gets below -10 is stopped here.
+	var boundary := StaticBody3D.new()
+	boundary.name = "VoidBoundary"
+	var boundary_shape := CollisionShape3D.new()
+	var plane := WorldBoundaryShape3D.new()
+	plane.plane = Plane(Vector3.UP, -10.0)
+	boundary_shape.shape = plane
+	boundary.add_child(boundary_shape)
+	add_child(boundary)
 	var light := DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-45, 45, 0)
 	light.light_energy = 1.2
 	add_child(light)
 	_update_ui()
+	# Safe-init complete: let 2 physics frames register all shapes,
+	# then drop the player (spawn y=3.0, rests at y=2.0) with physics on.
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	if is_instance_valid(player):
+		player.velocity = Vector3.ZERO
+		player.set_physics_process(true)
 
 func _process(delta: float) -> void:
 	if phase == Phase.ALARM:
@@ -89,6 +125,13 @@ func _process(delta: float) -> void:
 			return
 		_update_ui()
 	if player == null:
+		return
+	# Void safety net: if the player ever ends up below the world
+	# (physics glitch, off-map fall, etc.), respawn at the parking
+	# lot start instead of leaving them falling forever.
+	if player.global_position.y < -5.0:
+		player.global_position = spawn_pos
+		player.velocity = Vector3.ZERO
 		return
 	if driving and vehicle != null:
 		vehicle.joystick_vector = player.joystick_vector
@@ -157,7 +200,10 @@ func restart() -> void:
 		keycard_pos = markers["keycard_world_pos"]
 		vehicle_start = markers["vehicle_start"]
 		escape_zone = markers["escape_zone"]
-		player.position = markers["player_start"]
+		spawn_pos = markers["player_start"]
+		player.position = spawn_pos
+		player.velocity = Vector3.ZERO
+		player.set_physics_process(true)
 		player.visible = true
 		player.driving = false
 		if vehicle != null:

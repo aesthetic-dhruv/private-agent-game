@@ -107,5 +107,9 @@ static func build(world: VoxelWorld) -> Dictionary:
 		"keycard_world_pos": Vector3(keycard_pos) + Vector3(0.5, 0.5, 0.5),
 		"vehicle_start": Vector3(-5.0, 1.0, 15.0),
 		"escape_zone": Vector3(26.0, 1.0, 16.0),
-		"player_start": Vector3(-5.0, 2.0, 18.0),
+		# v0.3.1: spawn 1 unit above the floor top (floor voxel y=0,
+		# top at y=1.0; player capsule half-height is ~1.0, so the
+		# player rests at y=2.0). Spawning at 3.0 drops safely onto
+		# the floor instead of starting exactly touching it.
+		"player_start": Vector3(-5.0, 3.0, 18.0),
 	}

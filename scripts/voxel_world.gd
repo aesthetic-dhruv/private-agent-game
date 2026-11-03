@@ -66,7 +66,16 @@ func add_voxel(grid_pos: Vector3i, voxel_type: String) -> Node3D:
 	mesh.mesh = _box_mesh
 	mesh.material_override = _materials.get(voxel_type, _materials["brick"])
 	root.add_child(mesh)
-	if voxel_type != "floor" and voxel_type != "keycard" and voxel_type != "escape":
+	# v0.3.1 spawn fix: floor voxels MUST have a collision body.
+	# Before this, floor was visual-only (no StaticBody) and the game
+	# relied on a WorldBoundary plane at y=0, which a CharacterBody
+	# does not reliably land on — so the player fell straight through
+	# the visible floor into the void. Raising the spawn alone would
+	# only have delayed that fall, not stopped it.
+	# Floor is still indestructible: damage_voxel() blocks floor, and
+	# health for floor is -1. Keycard/escape stay body-less on purpose
+	# (keycard is collected by proximity, escape is a drive-to marker).
+	if voxel_type != "keycard" and voxel_type != "escape":
 		var body := StaticBody3D.new()
 		body.set_meta("grid_pos", grid_pos)
 		body.set_meta("voxel_type", voxel_type)
