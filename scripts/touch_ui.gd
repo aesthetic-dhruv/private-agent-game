@@ -198,11 +198,20 @@ func _input(event: InputEvent) -> void:
 			_camera_touch_id = -1
 	elif event is InputEventScreenDrag:
 		if event.index == _joystick_touch_id and player != null:
-			var delta_vec := event.position - _joystick_drag_centre
+			# v0.3.3 parse fix: do NOT use := here. event is typed
+			# as InputEvent, which has no position property, so the
+			# compiler treats event.position as Variant and := fails
+			# with "Cannot infer the type". Explicit Vector2 type
+			# fixes it, and this was the real reason TouchUI never
+			# loaded, GameManager._ready aborted at TouchUI.new(),
+			# and no UI buttons ever appeared on the phone.
+			var delta_vec: Vector2 = event.position - _joystick_drag_centre
 			if delta_vec.length() > 60:
 				delta_vec = delta_vec.normalized() * 60
 			player.joystick_vector = delta_vec / 60.0
 		elif event.index == _camera_touch_id and player != null:
-			var drag_delta := event.position - _last_camera_pos
+			# Same parse fix as delta_vec above: explicit Vector2,
+			# never :=, for event.position on a base InputEvent.
+			var drag_delta: Vector2 = event.position - _last_camera_pos
 			_last_camera_pos = event.position
 			player.rotate_camera(drag_delta.x, drag_delta.y)

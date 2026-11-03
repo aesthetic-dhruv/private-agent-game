@@ -81,11 +81,15 @@ func _ready() -> void:
 	ui.name = "TouchUI"
 	ui.layer = 10
 	ui.visible = true
-	# Top-level CanvasLayer: add to the scene root, not under this
-	# 3D Node3D, so no 3D parent transform/visibility can hide it.
-	# GameManager still holds the reference and updates it via
-	# _update_ui(), in this exact order: UI created, then links set.
-	get_tree().root.add_child(ui)
+	# v0.3.3: UI is added as a child of GameManager, NOT to the
+	# scene root. Headless test proved get_tree().root.add_child()
+	# during _ready() fails with "Parent node is busy setting up
+	# children" — the root is still adding the Main scene when
+	# GameManager._ready() runs. GameManager itself is identity
+	# transform, and CanvasLayer layer 10 renders above the 3D
+	# world regardless of its parent, so this is still top-level
+	# rendering, without the busy-parent failure.
+	add_child(ui)
 	ui.player = player
 	ui.game_manager = self
 	world.voxel_destroyed.connect(_on_voxel_destroyed)
