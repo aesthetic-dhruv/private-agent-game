@@ -24,6 +24,19 @@ name: Build Android APK
 #   default is platform-tools only, dropping the removed 'tools' package
 #   that v3 tried to install), upload-artifact (name + path + if-no-files-found).
 #   GitHub-hosted runners already satisfy the v2.327.1+ runner floor.
+# Workspace-local Godot user dirs (Run #4):
+# - Godot has NO editor setting to point to an arbitrary templates
+#   folder, so a literal ${GITHUB_WORKSPACE}/templates/ folder alone
+#   would be ignored and export would fail with templates not found.
+#   On Linux Godot follows the XDG spec, so the working override is
+#   XDG_DATA_HOME / XDG_CONFIG_HOME / XDG_CACHE_HOME. Setting those
+#   to dot-folders inside the workspace moves BOTH the templates
+#   (XDG_DATA_HOME/godot/export_templates/<version>/) and the editor
+#   settings (XDG_CONFIG_HOME/godot/editor_settings-4.tres) into the
+#   workspace, where the log dump can show them. Dot-folders are used
+#   on purpose: a plain templates/ folder at the project root would
+#   be scanned as project resources and could be pulled into the
+#   export (preset export_filter is all_resources).
 # - This workflow has NOT been run in GitHub Actions from this sandbox.
 #   It is the standard Godot 4.2 headless export sequence, written to
 #   match this project's project.godot (Godot 4.2, mobile renderer).
@@ -78,7 +91,16 @@ jobs:
       - name: Download official Godot headless + export templates
         run: |
           set -e
-          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}"
+          # Workspace-local XDG dirs (see header comment). Persist
+          # them via GITHUB_ENV so every later Godot step uses the
+          # same template + editor-settings locations.
+          export XDG_DATA_HOME="${GITHUB_WORKSPACE}/.godot-xdg/data"
+          export XDG_CONFIG_HOME="${GITHUB_WORKSPACE}/.godot-xdg/config"
+          export XDG_CACHE_HOME="${GITHUB_WORKSPACE}/.godot-xdg/cache"
+          echo "XDG_DATA_HOME=$XDG_DATA_HOME" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$XDG_CACHE_HOME" >> "$GITHUB_ENV"
+          TEMPLATE_DIR="$XDG_DATA_HOME/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}"
           echo "TEMPLATE_DIR=$TEMPLATE_DIR" >> "$GITHUB_ENV"
           mkdir -p "$HOME/godot" "$TEMPLATE_DIR"
           cd "$HOME/godot"
@@ -88,8 +110,9 @@ jobs:
           mv "Godot_v${GODOT_VERSION}-${GODOT_STATUS}_linux.x86_64" godot
           echo "$HOME/godot" >> "$GITHUB_PATH"
           # Export templates MUST match the Godot version exactly.
-          # Linux template dir is $HOME/.local/share/godot/export_templates/<version>/,
-          # e.g. 4.2.2.stable for Godot 4.2.2 stable.
+          # With the XDG override above, the template dir is
+          # ${GITHUB_WORKSPACE}/.godot-xdg/data/godot/export_templates/4.2.2.stable
+          # instead of $HOME/.local/share/godot/export_templates/4.2.2.stable.
           wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-${GODOT_STATUS}/Godot_v${GODOT_VERSION}-${GODOT_STATUS}_export_templates.tpz" -O templates.tpz
           unzip -o templates.tpz -d "$TEMPLATE_DIR"
           # The .tpz unpacks into a folder literally named templates/;
@@ -101,7 +124,13 @@ jobs:
           fi
           # Godot also expects version.txt next to the templates.
           echo "${GODOT_VERSION}.${GODOT_STATUS}" > "$TEMPLATE_DIR/version.txt"
-          echo "=== Template directory (absolute) ==="
+          # Explicit template execution permissions. The .apk templates
+          # are not scripts, so this does not change Godot's export
+          # logic — it only guarantees the runner cannot block on a
+          # missing execute bit for the extracted template files.
+          chmod +x "$TEMPLATE_DIR"/*.apk || true
+          chmod -R a+rX "$TEMPLATE_DIR"
+          echo "=== Template directory (absolute, workspace-local) ==="
           ls -lh "$TEMPLATE_DIR"
           echo "=== Strict template check: fail here, not in export ==="
           test -f "$TEMPLATE_DIR/android_debug.apk" || { echo "::error::Missing $TEMPLATE_DIR/android_debug.apk"; exit 1; }
@@ -142,12 +171,21 @@ jobs:
         # include JAVA_HOME (set by setup-java) explicitly.
         run: |
           set -e
-          mkdir -p "$HOME/.config/godot"
-          printf '%s\n' '[gd_resource type="EditorSettings" format=3]' '' '[resource]' "export/android/android_sdk_path = \"${ANDROID_SDK_ROOT}\"" "export/android/java_sdk_path = \"${JAVA_HOME}\"" "export/android/debug_keystore = \"${GITHUB_WORKSPACE}/debug.keystore\"" 'export/android/debug_keystore_user = "androiddebugkey"' 'export/android/debug_keystore_pass = "android"' > "$HOME/.config/godot/editor_settings-4.tres"
-          cp "$HOME/.config/godot/editor_settings-4.tres" "$HOME/.config/godot/editor_settings-4.2.tres"
-          echo "=== Editor settings ==="
-          cat "$HOME/.config/godot/editor_settings-4.tres"
-          ls -lh "$HOME/.config/godot/"
+          # With the XDG override, Godot reads editor settings from
+          # $XDG_CONFIG_HOME/godot/, NOT from $HOME/.config/godot/.
+          # Write to the XDG location first, and keep a $HOME copy as
+          # a fallback in case an XDG variable is ever lost.
+          CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/godot"
+          mkdir -p "$CONFIG_DIR" "$HOME/.config/godot"
+          printf '%s\n' '[gd_resource type="EditorSettings" format=3]' '' '[resource]' "export/android/android_sdk_path = \"${ANDROID_SDK_ROOT}\"" "export/android/java_sdk_path = \"${JAVA_HOME}\"" "export/android/debug_keystore = \"${GITHUB_WORKSPACE}/debug.keystore\"" 'export/android/debug_keystore_user = "androiddebugkey"' 'export/android/debug_keystore_pass = "android"' > "$CONFIG_DIR/editor_settings-4.tres"
+          cp "$CONFIG_DIR/editor_settings-4.tres" "$CONFIG_DIR/editor_settings-4.2.tres"
+          cp "$CONFIG_DIR/editor_settings-4.tres" "$HOME/.config/godot/editor_settings-4.tres"
+          cp "$CONFIG_DIR/editor_settings-4.tres" "$HOME/.config/godot/editor_settings-4.2.tres"
+          echo "=== Editor settings (XDG) ==="
+          echo "XDG_CONFIG_HOME=${XDG_CONFIG_HOME}"
+          echo "CONFIG_DIR=$CONFIG_DIR"
+          cat "$CONFIG_DIR/editor_settings-4.tres"
+          ls -lh "$CONFIG_DIR/"
 
       - name: Import project (creates .godot/ import cache)
         run: |
@@ -171,11 +209,13 @@ jobs:
           test -x "${JAVA_HOME}/bin/jarsigner" || { echo "::error::jarsigner not found at ${JAVA_HOME}/bin/jarsigner"; exit 1; }
           test -f "${GITHUB_WORKSPACE}/debug.keystore" || { echo "::error::Missing debug.keystore"; exit 1; }
           ls -lh "${GITHUB_WORKSPACE}/debug.keystore"
-          echo "=== Export templates (absolute, re-checked) ==="
-          echo "TEMPLATE_DIR=${TEMPLATE_DIR:-$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}}"
-          ls -lh "${TEMPLATE_DIR:-$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}}"
-          test -f "${TEMPLATE_DIR:-$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}}/android_debug.apk" || { echo "::error::android_debug.apk missing before export"; exit 1; }
-          test -f "${TEMPLATE_DIR:-$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}}/android_release.apk" || { echo "::error::android_release.apk missing before export"; exit 1; }
+          echo "=== Export templates (absolute, workspace-local, re-checked) ==="
+          echo "XDG_DATA_HOME=${XDG_DATA_HOME}"
+          echo "TEMPLATE_DIR=${TEMPLATE_DIR:-$XDG_DATA_HOME/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}}"
+          ls -la "${GITHUB_WORKSPACE}/.godot-xdg"
+          ls -lh "${TEMPLATE_DIR:-$XDG_DATA_HOME/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}}"
+          test -f "${TEMPLATE_DIR:-$XDG_DATA_HOME/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}}/android_debug.apk" || { echo "::error::android_debug.apk missing before export"; exit 1; }
+          test -f "${TEMPLATE_DIR:-$XDG_DATA_HOME/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}}/android_release.apk" || { echo "::error::android_release.apk missing before export"; exit 1; }
           echo "=== Output directory ==="
           mkdir -p "${GITHUB_WORKSPACE}/build/android"
           ls -la "${GITHUB_WORKSPACE}/build/android"
@@ -187,11 +227,33 @@ jobs:
         # debug keystore generated above.
         # --verbose is deliberate: if this still fails, the log must
         # show Godot's actual configuration error, not just exit 1.
+        # --display-driver headless + --audio-driver Dummy are the
+        # Godot 4 explicit no-window fallbacks (--no-window is a
+        # Godot 3 flag and is not used here).
+        # Exit-code handling is NOT a blind bypass: Godot headless
+        # can exit non-zero on shutdown warnings even when the APK
+        # was produced. So a non-zero exit is only forgiven when the
+        # APK exists, is non-empty, and passes a ZIP integrity check.
+        # If the APK is missing or corrupt, this step fails hard and
+        # dumps the output directory for diagnosis.
         run: |
-          godot --headless --verbose --path "${GITHUB_WORKSPACE}" --export-debug "Android" "${GITHUB_WORKSPACE}/build/android/VoxelHeist.apk"
+          set +e
+          godot --headless --display-driver headless --audio-driver Dummy --verbose --path "${GITHUB_WORKSPACE}" --export-debug "Android" "${GITHUB_WORKSPACE}/build/android/VoxelHeist.apk"
+          EXPORT_EXIT=$?
+          set -e
+          echo "Godot export exit code: $EXPORT_EXIT"
           echo "=== Export output ==="
-          ls -lh "${GITHUB_WORKSPACE}/build/android/"
-          test -f "${GITHUB_WORKSPACE}/build/android/VoxelHeist.apk" || { echo "::error::VoxelHeist.apk was not produced"; exit 1; }
+          ls -lh "${GITHUB_WORKSPACE}/build/android/" || true
+          if [ -s "${GITHUB_WORKSPACE}/build/android/VoxelHeist.apk" ] && unzip -t "${GITHUB_WORKSPACE}/build/android/VoxelHeist.apk" > /dev/null 2>&1; then
+            if [ "$EXPORT_EXIT" -ne 0 ]; then
+              echo "::warning::Godot exited $EXPORT_EXIT but VoxelHeist.apk exists and passes the ZIP check, so this is treated as a non-fatal shutdown warning, not a failed export."
+            fi
+            echo "VoxelHeist.apk is valid, continuing to artifact upload."
+          else
+            echo "::error::Godot export failed (exit $EXPORT_EXIT) and no valid VoxelHeist.apk was produced."
+            ls -la "${GITHUB_WORKSPACE}/build/android/" || true
+            exit 1
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v6
